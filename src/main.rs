@@ -5,82 +5,34 @@ use bb8::Pool;
 use bb8_postgres::PostgresConnectionManager;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, Request, Response, Server, StatusCode};
-use std::collections::HashMap;
 use std::convert::Infallible;
 use tokio_postgres::error::Error as TokioPostgresError;
 use tokio_postgres::{Client, NoTls};
 
-lazy_static! {
-    static ref TOKEN_SECRET_REGEX: regex::Regex = regex::Regex::new("^[a-fA-F0-9]{64}$").unwrap();
-
-    static ref ROUTES: HashMap<&'static str, HashMap<Method, Route>> = {
-        println!("build ROUTES static");
-        let mut routes = HashMap::new();
-
-        routes.insert(
-            "/users",
-            [
-                (Method::POST, Route{ auth_required: false, message: "POST /users!"})
-            ].iter().cloned().collect(),
-        );
-
-        routes.insert(
-            "/tokens",
-            [
-                (Method::GET, Route{ auth_required: true, message: "GET /tokens!"}),
-                (Method::POST, Route{ auth_required: false, message: "POST /tokens!"}),
-            ].iter().cloned().collect(),
-        );
-
-        routes.insert(
-            "/tokens/current",
-            [
-                (Method::GET, Route{ auth_required: true, message: "GET /tokens/current!"}),
-                (Method::DELETE, Route{ auth_required: true, message: "DELETE /tokens/current!"}),
-            ].iter().cloned().collect(),
-        );
-
-        routes.insert(
-            "/tokens/current/refresh",
-            [
-                (Method::POST, Route{ auth_required: true, message: "POST /tokens/current/refresh!"})
-            ].iter().cloned().collect(),
-        );
-
-        routes.insert(
-            "/tokens/current/valid",
-            [
-                (Method::GET, Route{ auth_required: true, message: "GET /tokens/current/valid!"})
-            ].iter().cloned().collect(),
-        );
-
-        routes
-    };
-
-    static ref ROUTES_REGEX: Vec<(regex::Regex, HashMap<Method, Route>)> = {
-        println!("build ROUTES_REGEX static");
-        let mut routes = Vec::new();
-
-        routes.push((
-            regex::Regex::new("^/tokens/[a-fA-F0-9]{32}$").unwrap(),
-            [
-                (Method::GET, Route{ auth_required: true, message: "GET /tokens/<id>!"}),
-                (Method::DELETE, Route{ auth_required: true, message: "DELETE /tokens/<id>!"}),
-            ].iter().cloned().collect(),
-        ));
-
-        routes
-    };
+enum Handler {
+    PostUsers,
+    GetTokens,
+    PostTokens,
+    GetTokensCurrent,
+    DeleteTokensCurrent,
+    PostTokensCurrentRefresh,
+    GetTokensCurrentValid,
+    GetTokensId,
+    DeleteTokensId,
 }
 
-#[derive(Copy, Clone)]
 struct Route {
     auth_required: bool,
-    message: &'static str,
+    handler: Handler,
 }
 
-fn route_request(request: &Request<Body>) -> Result<Route, Response<Body>> {
-    println!("route_request");
+lazy_static! {
+    static ref TOKEN_SECRET_REGEX: regex::Regex = regex::Regex::new("^[a-fA-F0-9]{64}$").unwrap();
+    static ref TOKENS_ID_PATH_REGEX: regex::Regex = regex::Regex::new("^/tokens/[a-fA-F0-9]{32}$").unwrap();
+}
+
+fn get_route(request: &Request<Body>) -> Result<Route, Response<Body>> {
+    println!("get_route");
 
     let orig_path = request.uri().path();
 
@@ -90,36 +42,138 @@ fn route_request(request: &Request<Body>) -> Result<Route, Response<Body>> {
         orig_path
     };
 
-    let mut path_routes = ROUTES.get(path);
+    let mut path_found = true;
 
-    if path_routes.is_none() {
-        for route_regex in ROUTES_REGEX.iter() {
-            if route_regex.0.is_match(path) {
-                path_routes = Some(&route_regex.1);
-                break;
-            }
-        }
+    match path {
+        "/users" => match *request.method() {
+            Method::POST => return Ok(Route { auth_required: false, handler: Handler::PostUsers }),
+            _ => ()
+        },
+        "/tokens" => match *request.method() {
+            Method::GET => return Ok(Route { auth_required: true, handler: Handler::GetTokens }),
+            Method::POST => return Ok(Route { auth_required: false, handler: Handler::PostTokens }),
+            _ => ()
+        },
+        "/tokens/current" => match *request.method() {
+            Method::GET => return Ok(Route { auth_required: true, handler: Handler::GetTokensCurrent }),
+            Method::DELETE => return Ok(Route { auth_required: true, handler: Handler::DeleteTokensCurrent }),
+            _ => ()
+        },
+        "/tokens/current/refresh" => match *request.method() {
+            Method::POST => return Ok(Route { auth_required: true, handler: Handler::PostTokensCurrentRefresh }),
+            _ => ()
+        },
+        "/tokens/current/valid" => match *request.method() {
+            Method::GET => return Ok(Route { auth_required: true, handler: Handler::GetTokensCurrentValid }),
+            _ => ()
+        },
+        _ => path_found = false
+    };
 
-        if path_routes.is_none() {
-            return Err(Response::builder()
-                .status(StatusCode::NOT_FOUND)
-                .body(Body::from("resource not found\n"))
-                .unwrap());
-        }
+    if !path_found && TOKENS_ID_PATH_REGEX.is_match(path) {
+        path_found = true;
+
+        match *request.method() {
+            Method::GET => return Ok(Route { auth_required: true, handler: Handler::GetTokensId }),
+            Method::DELETE => return Ok(Route { auth_required: true, handler: Handler::DeleteTokensId }),
+            _ => ()
+        };
     }
-    let path_routes = path_routes.unwrap();
 
-    let route = path_routes.get(request.method());
-
-    if route.is_none() {
+    if path_found {
         return Err(Response::builder()
-            .status(StatusCode::METHOD_NOT_ALLOWED)
-            .body(Body::from("method not allowed\n"))
-            .unwrap());
+                .status(StatusCode::METHOD_NOT_ALLOWED)
+                .body(Body::from("method not allowed\n"))
+                .unwrap())
     }
 
-    Ok(*route.unwrap())
+    Err(Response::builder()
+        .status(StatusCode::NOT_FOUND)
+        .body(Body::from("resource not found\n"))
+        .unwrap())
 }
+
+async fn handle_anonymous_request(handler: Handler, request: Request<Body>, db: &Client) -> Response<Body> {
+    match handler {
+        Handler::PostUsers => post_users(request, db).await,
+        Handler::PostTokens => post_tokens(request, db).await,
+        _ => Response::builder()
+                .status(StatusCode::SERVICE_UNAVAILABLE)
+                .body(Body::from("service unavailable\n"))
+                .unwrap()
+    }
+}
+
+async fn post_users(request: Request<Body>, db: &Client) -> Response<Body> {
+    Response::builder()
+        .body(Body::from("POST Users!\n"))
+        .unwrap()
+}
+
+async fn post_tokens(request: Request<Body>, db: &Client) -> Response<Body> {
+    Response::builder()
+        .body(Body::from("POST Tokens!\n"))
+        .unwrap()
+}
+
+async fn handle_authenticated_request(handler: Handler, request: Request<Body>, db: &Client, user_id: i32) -> Response<Body> {
+    match handler {
+        Handler::GetTokens => get_tokens(request, db, user_id).await,
+        Handler::GetTokensCurrent => get_tokens_current(request, db, user_id).await,
+        Handler::DeleteTokensCurrent => delete_tokens_current(request, db, user_id).await,
+        Handler::PostTokensCurrentRefresh => post_tokens_current_refresh(request, db, user_id).await,
+        Handler::GetTokensCurrentValid => get_tokens_current_valid(request, db, user_id).await,
+        Handler::GetTokensId => get_tokens_id(request, db, user_id).await,
+        Handler::DeleteTokensId => delete_tokens_id(request, db, user_id).await,
+        _ => Response::builder()
+                .status(StatusCode::SERVICE_UNAVAILABLE)
+                .body(Body::from("service unavailable\n"))
+                .unwrap()
+    }
+}
+
+async fn get_tokens(request: Request<Body>, db: &Client, user_id: i32) -> Response<Body> {
+    Response::builder()
+        .body(Body::from(format!("get_tokens {}\n", user_id)))
+        .unwrap()
+}
+
+async fn get_tokens_current(request: Request<Body>, db: &Client, user_id: i32) -> Response<Body> {
+    Response::builder()
+        .body(Body::from(format!("get_tokens_current {}\n", user_id)))
+        .unwrap()
+}
+
+async fn delete_tokens_current(request: Request<Body>, db: &Client, user_id: i32) -> Response<Body> {
+    Response::builder()
+        .body(Body::from(format!("delete_tokens_current {}\n", user_id)))
+        .unwrap()
+}
+
+async fn post_tokens_current_refresh(request: Request<Body>, db: &Client, user_id: i32) -> Response<Body> {
+    Response::builder()
+        .body(Body::from(format!("post_tokens_current_refresh {}\n", user_id)))
+        .unwrap()
+}
+
+async fn get_tokens_current_valid(request: Request<Body>, db: &Client, user_id: i32) -> Response<Body> {
+    Response::builder()
+        .body(Body::from(format!("get_tokens_current_valid {}\n", user_id)))
+        .unwrap()
+}
+
+async fn get_tokens_id(request: Request<Body>, db: &Client, user_id: i32) -> Response<Body> {
+    Response::builder()
+        .body(Body::from(format!("get_tokens_id {}\n", user_id)))
+        .unwrap()
+}
+
+async fn delete_tokens_id(request: Request<Body>, db: &Client, user_id: i32) -> Response<Body> {
+    Response::builder()
+        .body(Body::from(format!("delete_tokens_id {}\n", user_id)))
+        .unwrap()
+}
+
 
 #[tokio::main]
 async fn main() {
@@ -140,7 +194,7 @@ async fn main() {
         async move {
             Ok::<_, Infallible>(service_fn(move |request: Request<_>| {
                 let pool = pool.clone();
-                async move { handle_request(request, pool).await }
+                async move { process_request(request, pool).await }
             }))
         }
     });
@@ -158,14 +212,14 @@ async fn main() {
     }
 }
 
-async fn handle_request(
+async fn process_request(
     request: Request<Body>,
     pool: Pool<PostgresConnectionManager<NoTls>>,
 ) -> Result<Response<Body>, Infallible> {
-    println!("handle_request");
+    println!("process_request");
     // do anything that doesn't need DB here before pool.run
     // (routing, token cookie presence/format)
-    let route = route_request(&request);
+    let route = get_route(&request);
     if route.is_err() {
         return Ok(route.err().unwrap());
     }
@@ -173,23 +227,25 @@ async fn handle_request(
 
     let mut token_secret_option = None;
     if route.auth_required {
-        match get_token_secret(request) {
+        match get_token_secret(&request) {
             Ok(secret) => token_secret_option = Some(secret),
             Err(response) => return Ok(response),
         }
     }
 
     let result = pool.run(move |db| {
-        let mut message = route.message.to_string();
         async move {
-            if let Some(token_secret) = token_secret_option {
+            let response = if let Some(token_secret) = token_secret_option {
                 match get_user_id(token_secret, &db).await {
-                    Ok(id) => message = format!("as user_id {}, {}", id, message),
-                    Err(response) => return Ok::<_, (TokioPostgresError, Client)>((response, db)),
+                    Ok(id) => handle_authenticated_request(route.handler, request, &db, id).await,
+                    Err(e) => e
                 }
-            }
+            } else {
+                handle_anonymous_request(route.handler, request, &db).await
+            };
+
             println!("send response\n");
-            Ok::<_, (TokioPostgresError, Client)>((Response::new(Body::from(message)), db))
+            Ok::<_, (TokioPostgresError, Client)>((response, db))
         }
     }).await;
 
@@ -224,7 +280,7 @@ async fn get_user_id(token_secret: String, db: &Client) -> Result<i32, Response<
     Ok(user_id)
 }
 
-fn get_token_secret(request: Request<Body>) -> Result<String, Response<Body>> {
+fn get_token_secret(request: &Request<Body>) -> Result<String, Response<Body>> {
     println!("get_token_secret");
     let mut token_secret_option = None;
     let mut found_token_cookie = false;
