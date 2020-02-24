@@ -295,7 +295,7 @@ async fn handle_authenticated_request(handler: Handler, db: &Client, token: Toke
     match handler {
         Handler::GetTokens => get_tokens(db, token.user_id).await,
         Handler::GetTokensCurrent => get_tokens_current(db, token).await,
-        Handler::DeleteTokensCurrent => delete_tokens_current(db, token.user_id).await,
+        Handler::DeleteTokensCurrent => delete_tokens_current(db, token.id).await,
         Handler::PostTokensCurrentRefresh => post_tokens_current_refresh(db, token.user_id).await,
         Handler::GetTokensCurrentValid => get_tokens_current_valid(),
         Handler::GetTokensId => get_tokens_id(db, token.user_id).await,
@@ -338,9 +338,14 @@ async fn get_tokens_current(db: &Client, token: Token) -> Response<Body> {
     query_token_details(token.id, token.user_id, db).await
 }
 
-async fn delete_tokens_current(db: &Client, user_id: i32) -> Response<Body> {
+async fn delete_tokens_current(db: &Client, token_id: String) -> Response<Body> {
+    db.execute("DELETE FROM token WHERE id = $1", &[&token_id])
+        .await
+        .unwrap();
+
     Response::builder()
-        .body(Body::from(format!("delete_tokens_current {}\n", user_id)))
+        .header("content-type", "application/json")
+        .body(Body::from(json!({"success":"the token used to make this request was deleted"}).to_string() + "\n"))
         .unwrap()
 }
 
