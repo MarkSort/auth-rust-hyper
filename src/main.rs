@@ -129,38 +129,47 @@ async fn handle_anonymous_request(handler: Handler, request: Request<Body>, db: 
     }
 }
 
-async fn post_users(user_spec: serde_json::Value, db: &Client) -> Response<Body> {
-    let email_option = user_spec["email"].as_str();
+fn get_email_pass(spec: &serde_json::Value) -> Result<(String, &[u8]), Response<Body>> {
+    let email_option = spec["email"].as_str();
     if email_option.is_none() {
-        return Response::builder()
+        return Err(Response::builder()
                 .status(StatusCode::BAD_REQUEST)
                 .body(Body::from(json!({ "error": "'email' is required and must be a string" }).to_string()+"\n"))
-                .unwrap()
+                .unwrap())
     }
     let email = email_option.unwrap();
 
     if email.len() > 150 {
-        return Response::builder()
+        return Err(Response::builder()
                 .status(StatusCode::BAD_REQUEST)
                 .body(Body::from(json!({ "error": "'email' must be 150 characters or less" }).to_string()+"\n"))
-                .unwrap()
+                .unwrap())
     }
 
-    let password_option = user_spec["password"].as_str();
+    let password_option = spec["password"].as_str();
     if password_option.is_none() {
-        return Response::builder()
+        return Err(Response::builder()
                 .status(StatusCode::BAD_REQUEST)
                 .body(Body::from(json!({ "error": "'password' is required and must be a string" }).to_string()+"\n"))
-                .unwrap()
+                .unwrap())
     }
     let password = password_option.unwrap();
+
+    Ok((email.to_string(), password.as_bytes()))
+}
+
+async fn post_users(user_spec: serde_json::Value, db: &Client) -> Response<Body> {
+    let (email, password) = match get_email_pass(&user_spec) {
+        Err(response) => return response,
+        Ok(email_password) => email_password
+    };
 
     // I have no idea if this is a good way to generate a salt
     let salt = rand::random::<u128>();
 
     let config = argon2::Config::default();
     let password_hash =
-        argon2::hash_encoded(password.as_bytes(), &salt.to_be_bytes(), &config).unwrap();
+        argon2::hash_encoded(password, &salt.to_be_bytes(), &config).unwrap();
 
     let result = db.query(
         "INSERT INTO identity VALUES (default, $1, $2) RETURNING id",
@@ -193,8 +202,87 @@ async fn post_users(user_spec: serde_json::Value, db: &Client) -> Response<Body>
 }
 
 async fn post_tokens(token_spec: serde_json::Value, db: &Client) -> Response<Body> {
+    let (email, password) = match get_email_pass(&token_spec) {
+        Err(response) => return response,
+        Ok(email_password) => email_password
+    };
+
+    let lifetime_option = token_spec["lifetime"].as_str();
+    if lifetime_option.is_none() {
+        return Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(Body::from(json!({"error": "'lifetime' is required and must be a string"}).to_string()+"\n"))
+                .unwrap()
+    }
+    let lifetime = lifetime_option.unwrap();
+
+    if lifetime != "until-idle"
+        && lifetime != "remember-me"
+        && lifetime != "no-expiration"
+    {
+        return Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(Body::from(json!({"error": "'lifetime' must be 'until-idle', 'remember-me', or 'no-expiration'"}).to_string()+"\n"))
+                .unwrap()
+    }
+
+    // get user record for the e-mail
+    let rows = db
+        .query(
+            "SELECT id, password FROM identity WHERE email = $1",
+            &[&email],
+        )
+        .await
+        .unwrap();
+    if rows.len() != 1 {
+        return Response::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .body(Body::from(json!({"error": "email not found or password invalid"}).to_string()+"\n"))
+            .unwrap()
+    }
+    let user = rows.get(0).unwrap();
+
+    // verify the password
+    let password_hash: String = user.get("password");
+    let matches = argon2::verify_encoded(&password_hash, &password).unwrap();
+    if !matches {
+        return Response::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .body(Body::from(json!({"error": "email not found or password invalid"}).to_string()+"\n"))
+            .unwrap()
+    }
+
+    // create a token
+    let user_id: i32 = user.get("id");
+    let token_id = format!("{:0>32x}", rand::random::<u128>());
+    let token_secret = format!(
+        "{:0>32x}{:0>32x}",
+        rand::random::<u128>(),
+        rand::random::<u128>()
+    );
+    let rows = db
+        .query(
+            "INSERT INTO token VALUES ($1, $2, $3, $4, now(), now()) \
+            RETURNING cast(extract(epoch from created) as integer) created, \
+                      cast(extract(epoch from last_active) as integer) last_active",
+            &[&token_id, &user_id, &token_secret, &lifetime],
+        )
+        .await
+        .unwrap();
+
+    let token = rows.get(0).unwrap();
+    let created: i32 = token.get("created");
+    let last_active: i32 = token.get("last_active");
+
     Response::builder()
-        .body(Body::from("POST Tokens!\n"))
+        .header("content-type", "application/json")
+        .body(Body::from(json!({
+            "id": token_id,
+            "token_secret": token_secret,
+            "lifetime": lifetime,
+            "created": created,
+            "last_active": last_active
+        }).to_string() + "\n"))
         .unwrap()
 }
 
