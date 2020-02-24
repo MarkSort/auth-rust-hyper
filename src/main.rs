@@ -292,7 +292,7 @@ async fn handle_authenticated_request(handler: Handler, request: Request<Body>, 
         Handler::GetTokensCurrent => get_tokens_current(db, user_id).await,
         Handler::DeleteTokensCurrent => delete_tokens_current(db, user_id).await,
         Handler::PostTokensCurrentRefresh => post_tokens_current_refresh(db, user_id).await,
-        Handler::GetTokensCurrentValid => get_tokens_current_valid(db, user_id).await,
+        Handler::GetTokensCurrentValid => get_tokens_current_valid(),
         Handler::GetTokensId => get_tokens_id(db, user_id).await,
         Handler::DeleteTokensId => delete_tokens_id(db, user_id).await,
         _ => Response::builder()
@@ -347,9 +347,9 @@ async fn post_tokens_current_refresh(db: &Client, user_id: i32) -> Response<Body
         .unwrap()
 }
 
-async fn get_tokens_current_valid(db: &Client, user_id: i32) -> Response<Body> {
+fn get_tokens_current_valid() -> Response<Body> {
     Response::builder()
-        .body(Body::from(format!("get_tokens_current_valid {}\n", user_id)))
+        .body(Body::empty())
         .unwrap()
 }
 
