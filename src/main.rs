@@ -310,14 +310,14 @@ async fn post_tokens(token_spec: serde_json::Value, db: &Client) -> Response<Bod
         .unwrap()
 }
 
-async fn handle_authenticated_request(handler: Handler, db: &Client, token: Token) -> Response<Body> {
-    match handler {
+async fn handle_authenticated_request(route: Route, db: &Client, token: Token) -> Response<Body> {
+    match route.handler {
         Handler::GetTokens => get_tokens(db, token.user_id).await,
         Handler::GetTokensCurrent => get_tokens_current(db, token).await,
         Handler::DeleteTokensCurrent => delete_tokens_current(db, token.id).await,
         Handler::PostTokensCurrentRefresh => post_tokens_current_refresh(db, token.id).await,
         Handler::GetTokensCurrentValid => get_tokens_current_valid(),
-        Handler::GetTokensId => get_tokens_id(db, token.user_id).await,
+        Handler::GetTokensId => get_tokens_id(db, token.user_id, &route.path_params[0]).await,
         Handler::DeleteTokensId => delete_tokens_id(db, token.user_id).await,
         _ => Response::builder()
                 .status(StatusCode::SERVICE_UNAVAILABLE)
@@ -400,10 +400,8 @@ fn get_tokens_current_valid() -> Response<Body> {
         .unwrap()
 }
 
-async fn get_tokens_id(db: &Client, user_id: i32) -> Response<Body> {
-    Response::builder()
-        .body(Body::from(format!("get_tokens_id {}\n", user_id)))
-        .unwrap()
+async fn get_tokens_id(db: &Client, user_id: i32, token_id: &String) -> Response<Body> {
+    query_token_details(token_id.to_string(), user_id, db).await
 }
 
 async fn delete_tokens_id(db: &Client, user_id: i32) -> Response<Body> {
@@ -476,7 +474,7 @@ async fn process_request(
         async move {
             let response = if let Some(token_secret) = token_secret_option {
                 match query_token_by_secret(token_secret, &db).await {
-                    Ok(token) => handle_authenticated_request(route.handler, &db, token).await,
+                    Ok(token) => handle_authenticated_request(route, &db, token).await,
                     Err(e) => e
                 }
             } else {
