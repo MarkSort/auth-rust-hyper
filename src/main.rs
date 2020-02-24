@@ -94,9 +94,9 @@ fn get_route(request: &Request<Body>) -> Result<Route, Response<Body>> {
     };
 
     if !path_found {
-        if let Some(id_match) = TOKENS_ID_PATH_REGEX.captures(path).unwrap().get(1) {
+        if let Some(id_match) = TOKENS_ID_PATH_REGEX.captures(path) {
             path_found = true;
-            let path_params = [id_match.as_str().to_string()].to_vec();
+            let path_params = [id_match.get(1).unwrap().as_str().to_string()].to_vec();
 
             match *request.method() {
                 Method::GET => return Ok(route_path_params(Handler::GetTokensId, path_params)),
@@ -129,7 +129,7 @@ async fn handle_anonymous_request(handler: Handler, request: Request<Body>, db: 
     match handler {
         Handler::PostUsers => post_users(data, db).await,
         Handler::PostTokens => post_tokens(data, db).await,
-        _ => json_err(StatusCode::SERVICE_UNAVAILABLE, "service unavailable\n")
+        _ => json_err(StatusCode::SERVICE_UNAVAILABLE, "service unavailable")
     }
 }
 
