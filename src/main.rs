@@ -1,17 +1,13 @@
-extern crate argon2;
-extern crate rand;
-
-#[macro_use]
-extern crate lazy_static;
-
 use bb8::Pool;
 use bb8_postgres::PostgresConnectionManager;
 use bytes::buf::BufExt;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, Request, Response, Server, StatusCode};
-use serde_json::{self, json};
+use lazy_static::*;
+use regex::Regex;
+use serde_json::{json};
 use std::convert::Infallible;
-use tokio_postgres::error::Error as TokioPostgresError;
+use tokio_postgres::error::{Error as TokioPostgresError, SqlState};
 use tokio_postgres::{Client, NoTls};
 
 struct Token {
@@ -50,8 +46,8 @@ fn route_anon(handler: Handler) -> Route {
 }
 
 lazy_static! {
-    static ref TOKEN_SECRET_REGEX: regex::Regex = regex::Regex::new("^[a-fA-F0-9]{64}$").unwrap();
-    static ref TOKENS_ID_PATH_REGEX: regex::Regex = regex::Regex::new("^/tokens/([a-fA-F0-9]{32})$").unwrap();
+    static ref TOKEN_SECRET_REGEX: Regex = Regex::new("^[a-fA-F0-9]{64}$").unwrap();
+    static ref TOKENS_ID_PATH_REGEX: Regex = Regex::new("^/tokens/([a-fA-F0-9]{32})$").unwrap();
 }
 
 fn get_route(request: &Request<Body>) -> Result<Route, Response<Body>> {
@@ -173,7 +169,7 @@ async fn post_users(user_spec: serde_json::Value, db: &Client) -> Response<Body>
 
     match result {
         Err(e) => {
-            if *e.code().unwrap() == tokio_postgres::error::SqlState::UNIQUE_VIOLATION {
+            if *e.code().unwrap() == SqlState::UNIQUE_VIOLATION {
                 return json_err(StatusCode::BAD_REQUEST, "'email' is already in use")
             }
             println!("error inserting identity {:?}", e);
@@ -281,7 +277,7 @@ async fn get_tokens(db: &Client, user_id: i32) -> Response<Body> {
     .await
     .unwrap();
 
-    let tokens: Vec<serde_json::value::Value> = rows.iter().map(
+    let tokens: Vec<serde_json::Value> = rows.iter().map(
         |token| {
             let id: String = token.get("id");
             let lifetime: String = token.get("lifetime");
@@ -528,7 +524,7 @@ fn get_token_secret(request: &Request<Body>) -> Result<String, Response<Body>> {
     }
 }
 
-fn json_ok(json: serde_json::value::Value) -> Response<Body> {
+fn json_ok(json: serde_json::Value) -> Response<Body> {
     Response::builder()
         .header("content-type", "application/json")
         .body(Body::from(json.to_string()+"\n"))
