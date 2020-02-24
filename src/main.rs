@@ -1,10 +1,15 @@
+extern crate argon2;
+extern crate rand;
+
 #[macro_use]
 extern crate lazy_static;
 
 use bb8::Pool;
 use bb8_postgres::PostgresConnectionManager;
+use bytes::buf::BufExt;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, Request, Response, Server, StatusCode};
+use serde_json::{self, json};
 use std::convert::Infallible;
 use tokio_postgres::error::Error as TokioPostgresError;
 use tokio_postgres::{Client, NoTls};
@@ -94,9 +99,29 @@ fn get_route(request: &Request<Body>) -> Result<Route, Response<Body>> {
 }
 
 async fn handle_anonymous_request(handler: Handler, request: Request<Body>, db: &Client) -> Response<Body> {
+    // TODO check content-type
+    let whole_body_result = hyper::body::aggregate(request).await;
+    if whole_body_result.is_err() {
+        println!("could not get whole body");
+        return Response::builder()
+                .status(StatusCode::SERVICE_UNAVAILABLE)
+                .body(Body::from("service unavailable\n"))
+                .unwrap()
+    }
+    let data_result: Result<serde_json::Value, _> = serde_json::from_reader(whole_body_result.unwrap().reader());
+    if data_result.is_err() {
+        println!("could not parse body {}", data_result.unwrap_err());
+        return Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(Body::from("could not parse body\n"))
+                .unwrap()
+    }
+
+    let data = data_result.unwrap();
+
     match handler {
-        Handler::PostUsers => post_users(request, db).await,
-        Handler::PostTokens => post_tokens(request, db).await,
+        Handler::PostUsers => post_users(data, db).await,
+        Handler::PostTokens => post_tokens(data, db).await,
         _ => Response::builder()
                 .status(StatusCode::SERVICE_UNAVAILABLE)
                 .body(Body::from("service unavailable\n"))
@@ -104,13 +129,70 @@ async fn handle_anonymous_request(handler: Handler, request: Request<Body>, db: 
     }
 }
 
-async fn post_users(request: Request<Body>, db: &Client) -> Response<Body> {
-    Response::builder()
-        .body(Body::from("POST Users!\n"))
-        .unwrap()
+async fn post_users(user_spec: serde_json::Value, db: &Client) -> Response<Body> {
+    let email_option = user_spec["email"].as_str();
+    if email_option.is_none() {
+        return Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(Body::from(json!({ "error": "'email' is required and must be a string" }).to_string()+"\n"))
+                .unwrap()
+    }
+    let email = email_option.unwrap();
+
+    if email.len() > 150 {
+        return Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(Body::from(json!({ "error": "'email' must be 150 characters or less" }).to_string()+"\n"))
+                .unwrap()
+    }
+
+    let password_option = user_spec["password"].as_str();
+    if password_option.is_none() {
+        return Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(Body::from(json!({ "error": "'password' is required and must be a string" }).to_string()+"\n"))
+                .unwrap()
+    }
+    let password = password_option.unwrap();
+
+    // I have no idea if this is a good way to generate a salt
+    let salt = rand::random::<u128>();
+
+    let config = argon2::Config::default();
+    let password_hash =
+        argon2::hash_encoded(password.as_bytes(), &salt.to_be_bytes(), &config).unwrap();
+
+    let result = db.query(
+        "INSERT INTO identity VALUES (default, $1, $2) RETURNING id",
+        &[&email, &password_hash]
+    ).await;
+
+    match result {
+        Err(e) => {
+            if *e.code().unwrap() == tokio_postgres::error::SqlState::UNIQUE_VIOLATION {
+                return Response::builder()
+                    .status(StatusCode::BAD_REQUEST)
+                    .body(Body::from(json!({"error": "'email' is already in use"}).to_string()+"\n"))
+                    .unwrap()
+            }
+            println!("error inserting identity {:?}", e);
+            Response::builder()
+                    .status(StatusCode::SERVICE_UNAVAILABLE)
+                    .body(Body::from("service unavailable\n"))
+                    .unwrap()
+        }
+        Ok(rows) => {
+            let id: i32 = rows.get(0).unwrap().get("id");
+
+            Response::builder()
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"id": id, "email": email }).to_string()+"\n"))
+                .unwrap()
+        }
+    }
 }
 
-async fn post_tokens(request: Request<Body>, db: &Client) -> Response<Body> {
+async fn post_tokens(token_spec: serde_json::Value, db: &Client) -> Response<Body> {
     Response::builder()
         .body(Body::from("POST Tokens!\n"))
         .unwrap()
@@ -118,13 +200,13 @@ async fn post_tokens(request: Request<Body>, db: &Client) -> Response<Body> {
 
 async fn handle_authenticated_request(handler: Handler, request: Request<Body>, db: &Client, user_id: i32) -> Response<Body> {
     match handler {
-        Handler::GetTokens => get_tokens(request, db, user_id).await,
-        Handler::GetTokensCurrent => get_tokens_current(request, db, user_id).await,
-        Handler::DeleteTokensCurrent => delete_tokens_current(request, db, user_id).await,
-        Handler::PostTokensCurrentRefresh => post_tokens_current_refresh(request, db, user_id).await,
-        Handler::GetTokensCurrentValid => get_tokens_current_valid(request, db, user_id).await,
-        Handler::GetTokensId => get_tokens_id(request, db, user_id).await,
-        Handler::DeleteTokensId => delete_tokens_id(request, db, user_id).await,
+        Handler::GetTokens => get_tokens(db, user_id).await,
+        Handler::GetTokensCurrent => get_tokens_current(db, user_id).await,
+        Handler::DeleteTokensCurrent => delete_tokens_current(db, user_id).await,
+        Handler::PostTokensCurrentRefresh => post_tokens_current_refresh(db, user_id).await,
+        Handler::GetTokensCurrentValid => get_tokens_current_valid(db, user_id).await,
+        Handler::GetTokensId => get_tokens_id(db, user_id).await,
+        Handler::DeleteTokensId => delete_tokens_id(db, user_id).await,
         _ => Response::builder()
                 .status(StatusCode::SERVICE_UNAVAILABLE)
                 .body(Body::from("service unavailable\n"))
@@ -132,43 +214,43 @@ async fn handle_authenticated_request(handler: Handler, request: Request<Body>, 
     }
 }
 
-async fn get_tokens(request: Request<Body>, db: &Client, user_id: i32) -> Response<Body> {
+async fn get_tokens(db: &Client, user_id: i32) -> Response<Body> {
     Response::builder()
         .body(Body::from(format!("get_tokens {}\n", user_id)))
         .unwrap()
 }
 
-async fn get_tokens_current(request: Request<Body>, db: &Client, user_id: i32) -> Response<Body> {
+async fn get_tokens_current(db: &Client, user_id: i32) -> Response<Body> {
     Response::builder()
         .body(Body::from(format!("get_tokens_current {}\n", user_id)))
         .unwrap()
 }
 
-async fn delete_tokens_current(request: Request<Body>, db: &Client, user_id: i32) -> Response<Body> {
+async fn delete_tokens_current(db: &Client, user_id: i32) -> Response<Body> {
     Response::builder()
         .body(Body::from(format!("delete_tokens_current {}\n", user_id)))
         .unwrap()
 }
 
-async fn post_tokens_current_refresh(request: Request<Body>, db: &Client, user_id: i32) -> Response<Body> {
+async fn post_tokens_current_refresh(db: &Client, user_id: i32) -> Response<Body> {
     Response::builder()
         .body(Body::from(format!("post_tokens_current_refresh {}\n", user_id)))
         .unwrap()
 }
 
-async fn get_tokens_current_valid(request: Request<Body>, db: &Client, user_id: i32) -> Response<Body> {
+async fn get_tokens_current_valid(db: &Client, user_id: i32) -> Response<Body> {
     Response::builder()
         .body(Body::from(format!("get_tokens_current_valid {}\n", user_id)))
         .unwrap()
 }
 
-async fn get_tokens_id(request: Request<Body>, db: &Client, user_id: i32) -> Response<Body> {
+async fn get_tokens_id(db: &Client, user_id: i32) -> Response<Body> {
     Response::builder()
         .body(Body::from(format!("get_tokens_id {}\n", user_id)))
         .unwrap()
 }
 
-async fn delete_tokens_id(request: Request<Body>, db: &Client, user_id: i32) -> Response<Body> {
+async fn delete_tokens_id(db: &Client, user_id: i32) -> Response<Body> {
     Response::builder()
         .body(Body::from(format!("delete_tokens_id {}\n", user_id)))
         .unwrap()
