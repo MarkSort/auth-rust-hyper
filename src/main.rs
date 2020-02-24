@@ -14,6 +14,11 @@ use std::convert::Infallible;
 use tokio_postgres::error::Error as TokioPostgresError;
 use tokio_postgres::{Client, NoTls};
 
+struct Token {
+    id: String,
+    user_id: i32,
+}
+
 enum Handler {
     PostUsers,
     GetTokens,
@@ -286,15 +291,15 @@ async fn post_tokens(token_spec: serde_json::Value, db: &Client) -> Response<Bod
         .unwrap()
 }
 
-async fn handle_authenticated_request(handler: Handler, request: Request<Body>, db: &Client, user_id: i32) -> Response<Body> {
+async fn handle_authenticated_request(handler: Handler, db: &Client, token: Token) -> Response<Body> {
     match handler {
-        Handler::GetTokens => get_tokens(db, user_id).await,
-        Handler::GetTokensCurrent => get_tokens_current(db, user_id).await,
-        Handler::DeleteTokensCurrent => delete_tokens_current(db, user_id).await,
-        Handler::PostTokensCurrentRefresh => post_tokens_current_refresh(db, user_id).await,
+        Handler::GetTokens => get_tokens(db, token.user_id).await,
+        Handler::GetTokensCurrent => get_tokens_current(db, token.user_id).await,
+        Handler::DeleteTokensCurrent => delete_tokens_current(db, token.user_id).await,
+        Handler::PostTokensCurrentRefresh => post_tokens_current_refresh(db, token.user_id).await,
         Handler::GetTokensCurrentValid => get_tokens_current_valid(),
-        Handler::GetTokensId => get_tokens_id(db, user_id).await,
-        Handler::DeleteTokensId => delete_tokens_id(db, user_id).await,
+        Handler::GetTokensId => get_tokens_id(db, token.user_id).await,
+        Handler::DeleteTokensId => delete_tokens_id(db, token.user_id).await,
         _ => Response::builder()
                 .status(StatusCode::SERVICE_UNAVAILABLE)
                 .body(Body::from("service unavailable\n"))
@@ -428,8 +433,8 @@ async fn process_request(
     let result = pool.run(move |db| {
         async move {
             let response = if let Some(token_secret) = token_secret_option {
-                match get_user_id(token_secret, &db).await {
-                    Ok(id) => handle_authenticated_request(route.handler, request, &db, id).await,
+                match get_token(token_secret, &db).await {
+                    Ok(token) => handle_authenticated_request(route.handler, &db, token).await,
                     Err(e) => e
                 }
             } else {
@@ -453,10 +458,10 @@ async fn process_request(
     })
 }
 
-async fn get_user_id(token_secret: String, db: &Client) -> Result<i32, Response<Body>> {
-    println!("get_user_id");
+async fn get_token(token_secret: String, db: &Client) -> Result<Token, Response<Body>> {
+    println!("get_token");
     let rows = db.query(
-        "SELECT identity_id FROM token_active WHERE secret = $1",
+        "SELECT id, identity_id FROM token_active WHERE secret = $1",
         &[&token_secret],
     ).await.unwrap();
 
@@ -467,9 +472,11 @@ async fn get_user_id(token_secret: String, db: &Client) -> Result<i32, Response<
             .unwrap());
     }
 
-    let user_id: i32 = rows.get(0).unwrap().get("identity_id");
+    let row = rows.get(0).unwrap();
+    let id: String = row.get("id");
+    let user_id: i32 = row.get("identity_id");
 
-    Ok(user_id)
+    Ok(Token{ id, user_id })
 }
 
 fn get_token_secret(request: &Request<Body>) -> Result<String, Response<Body>> {
