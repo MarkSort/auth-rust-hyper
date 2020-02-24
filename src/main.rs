@@ -318,7 +318,7 @@ async fn handle_authenticated_request(route: Route, db: &Client, token: Token) -
         Handler::PostTokensCurrentRefresh => post_tokens_current_refresh(db, token.id).await,
         Handler::GetTokensCurrentValid => get_tokens_current_valid(),
         Handler::GetTokensId => get_tokens_id(db, token.user_id, &route.path_params[0]).await,
-        Handler::DeleteTokensId => delete_tokens_id(db, token.user_id).await,
+        Handler::DeleteTokensId => delete_tokens_id(db, token, &route.path_params[0]).await,
         _ => Response::builder()
                 .status(StatusCode::SERVICE_UNAVAILABLE)
                 .body(Body::from("service unavailable\n"))
@@ -404,9 +404,32 @@ async fn get_tokens_id(db: &Client, user_id: i32, token_id: &String) -> Response
     query_token_details(token_id.to_string(), user_id, db).await
 }
 
-async fn delete_tokens_id(db: &Client, user_id: i32) -> Response<Body> {
+async fn delete_tokens_id(db: &Client, token: Token, token_id: &String) -> Response<Body> {
+    if *token_id == token.id {
+        return Response::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .body(Body::from(json!({"error": "to delete current token, use the /tokens/current endpoint"}).to_string()+"\n"))
+            .unwrap()
+    }
+
+    let rows_deleted = db
+        .execute(
+            "DELETE FROM token_active WHERE id = $1 AND identity_id=$2",
+            &[token_id, &token.user_id],
+        )
+        .await
+        .unwrap();
+
+    if rows_deleted < 1 {
+        return Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .body(Body::from(json!({"error": "invalid or expired token id"}).to_string()+"\n"))
+            .unwrap()
+    }
+
     Response::builder()
-        .body(Body::from(format!("delete_tokens_id {}\n", user_id)))
+        .header("content-type", "application/json")
+        .body(Body::from(json!({"success": "the token was deleted"}).to_string() + "\n"))
         .unwrap()
 }
 
