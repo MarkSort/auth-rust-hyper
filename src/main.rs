@@ -303,8 +303,29 @@ async fn handle_authenticated_request(handler: Handler, request: Request<Body>, 
 }
 
 async fn get_tokens(db: &Client, user_id: i32) -> Response<Body> {
+    let rows = db
+    .query(
+        "SELECT id, lifetime, cast(extract(epoch from created) as integer) created, \
+            cast(extract(epoch from last_active) as integer) last_active FROM token_active \
+        WHERE identity_id = $1",
+        &[&user_id],
+    )
+    .await
+    .unwrap();
+
+    let tokens: Vec<serde_json::value::Value> = rows.iter().map(
+        |token| {
+            let id: String = token.get("id");
+            let lifetime: String = token.get("lifetime");
+            let created: i32 = token.get("created");
+            let last_active: i32 = token.get("last_active");
+            json!({ "id": id, "lifetime": lifetime, "created": created, "last_active": last_active })
+        }
+    ).collect();
+
     Response::builder()
-        .body(Body::from(format!("get_tokens {}\n", user_id)))
+        .header("content-type", "application/json")
+        .body(Body::from(json!({"user_id": user_id, "tokens": tokens }).to_string() + "\n"))
         .unwrap()
 }
 
@@ -403,6 +424,7 @@ async fn process_request(
         }
     }
 
+    println!("get db connection");
     let result = pool.run(move |db| {
         async move {
             let response = if let Some(token_secret) = token_secret_option {
