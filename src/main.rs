@@ -296,7 +296,7 @@ async fn handle_authenticated_request(handler: Handler, db: &Client, token: Toke
         Handler::GetTokens => get_tokens(db, token.user_id).await,
         Handler::GetTokensCurrent => get_tokens_current(db, token).await,
         Handler::DeleteTokensCurrent => delete_tokens_current(db, token.id).await,
-        Handler::PostTokensCurrentRefresh => post_tokens_current_refresh(db, token.user_id).await,
+        Handler::PostTokensCurrentRefresh => post_tokens_current_refresh(db, token.id).await,
         Handler::GetTokensCurrentValid => get_tokens_current_valid(),
         Handler::GetTokensId => get_tokens_id(db, token.user_id).await,
         Handler::DeleteTokensId => delete_tokens_id(db, token.user_id).await,
@@ -349,9 +349,29 @@ async fn delete_tokens_current(db: &Client, token_id: String) -> Response<Body> 
         .unwrap()
 }
 
-async fn post_tokens_current_refresh(db: &Client, user_id: i32) -> Response<Body> {
+async fn post_tokens_current_refresh(db: &Client, token_id: String) -> Response<Body> {
+    let rows = db.query(
+        "UPDATE token SET last_active = now() WHERE id = $1 \
+        RETURNING lifetime, cast(extract(epoch from created) as integer) created, \
+        cast(extract(epoch from last_active) as integer) last_active",
+        &[&token_id],
+    )
+        .await
+        .unwrap();
+
+    let token = rows.get(0).unwrap();
+    let lifetime: String = token.get("lifetime");
+    let created: i32 = token.get("created");
+    let last_active: i32 = token.get("last_active");
+
     Response::builder()
-        .body(Body::from(format!("post_tokens_current_refresh {}\n", user_id)))
+        .header("content-type", "application/json")
+        .body(Body::from(json!({
+            "id": token_id,
+            "lifetime": lifetime,
+            "created": created,
+            "last_active": last_active
+        }).to_string() + "\n"))
         .unwrap()
 }
 
