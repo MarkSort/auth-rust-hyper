@@ -110,16 +110,10 @@ fn get_route(request: &Request<Body>) -> Result<Route, Response<Body>> {
     }
 
     if path_found {
-        return Err(Response::builder()
-                .status(StatusCode::METHOD_NOT_ALLOWED)
-                .body(Body::from("method not allowed\n"))
-                .unwrap())
+        return Err(json_err(StatusCode::METHOD_NOT_ALLOWED, "method not allowed"))
     }
 
-    Err(Response::builder()
-        .status(StatusCode::NOT_FOUND)
-        .body(Body::from("resource not found\n"))
-        .unwrap())
+    Err(json_err(StatusCode::NOT_FOUND, "resource not found"))
 }
 
 async fn handle_anonymous_request(handler: Handler, request: Request<Body>, db: &Client) -> Response<Body> {
@@ -127,18 +121,12 @@ async fn handle_anonymous_request(handler: Handler, request: Request<Body>, db: 
     let whole_body_result = hyper::body::aggregate(request).await;
     if whole_body_result.is_err() {
         println!("could not get whole body");
-        return Response::builder()
-                .status(StatusCode::SERVICE_UNAVAILABLE)
-                .body(Body::from("service unavailable\n"))
-                .unwrap()
+        return json_err(StatusCode::SERVICE_UNAVAILABLE, "service unavailable\n")
     }
     let data_result: Result<serde_json::Value, _> = serde_json::from_reader(whole_body_result.unwrap().reader());
     if data_result.is_err() {
         println!("could not parse body {}", data_result.unwrap_err());
-        return Response::builder()
-                .status(StatusCode::BAD_REQUEST)
-                .body(Body::from("could not parse body\n"))
-                .unwrap()
+        return json_err(StatusCode::BAD_REQUEST, "could not parse body\n")
     }
 
     let data = data_result.unwrap();
@@ -146,36 +134,24 @@ async fn handle_anonymous_request(handler: Handler, request: Request<Body>, db: 
     match handler {
         Handler::PostUsers => post_users(data, db).await,
         Handler::PostTokens => post_tokens(data, db).await,
-        _ => Response::builder()
-                .status(StatusCode::SERVICE_UNAVAILABLE)
-                .body(Body::from("service unavailable\n"))
-                .unwrap()
+        _ => json_err(StatusCode::SERVICE_UNAVAILABLE, "service unavailable\n")
     }
 }
 
 fn get_email_pass(spec: &serde_json::Value) -> Result<(String, &[u8]), Response<Body>> {
     let email_option = spec["email"].as_str();
     if email_option.is_none() {
-        return Err(Response::builder()
-                .status(StatusCode::BAD_REQUEST)
-                .body(Body::from(json!({ "error": "'email' is required and must be a string" }).to_string()+"\n"))
-                .unwrap())
+        return Err(json_err(StatusCode::BAD_REQUEST, "'email' is required and must be a string"))
     }
     let email = email_option.unwrap();
 
     if email.len() > 150 {
-        return Err(Response::builder()
-                .status(StatusCode::BAD_REQUEST)
-                .body(Body::from(json!({ "error": "'email' must be 150 characters or less" }).to_string()+"\n"))
-                .unwrap())
+        return Err(json_err(StatusCode::BAD_REQUEST, "'email' must be 150 characters or less"))
     }
 
     let password_option = spec["password"].as_str();
     if password_option.is_none() {
-        return Err(Response::builder()
-                .status(StatusCode::BAD_REQUEST)
-                .body(Body::from(json!({ "error": "'password' is required and must be a string" }).to_string()+"\n"))
-                .unwrap())
+        return Err(json_err(StatusCode::BAD_REQUEST, "'password' is required and must be a string"))
     }
     let password = password_option.unwrap();
 
@@ -203,24 +179,15 @@ async fn post_users(user_spec: serde_json::Value, db: &Client) -> Response<Body>
     match result {
         Err(e) => {
             if *e.code().unwrap() == tokio_postgres::error::SqlState::UNIQUE_VIOLATION {
-                return Response::builder()
-                    .status(StatusCode::BAD_REQUEST)
-                    .body(Body::from(json!({"error": "'email' is already in use"}).to_string()+"\n"))
-                    .unwrap()
+                return json_err(StatusCode::BAD_REQUEST, "'email' is already in use")
             }
             println!("error inserting identity {:?}", e);
-            Response::builder()
-                    .status(StatusCode::SERVICE_UNAVAILABLE)
-                    .body(Body::from("service unavailable\n"))
-                    .unwrap()
+            json_err(StatusCode::SERVICE_UNAVAILABLE, "service unavailable")
         }
         Ok(rows) => {
             let id: i32 = rows.get(0).unwrap().get("id");
 
-            Response::builder()
-                .header("content-type", "application/json")
-                .body(Body::from(json!({"id": id, "email": email }).to_string()+"\n"))
-                .unwrap()
+            json_ok(json!({"id": id, "email": email }))
         }
     }
 }
@@ -233,10 +200,7 @@ async fn post_tokens(token_spec: serde_json::Value, db: &Client) -> Response<Bod
 
     let lifetime_option = token_spec["lifetime"].as_str();
     if lifetime_option.is_none() {
-        return Response::builder()
-                .status(StatusCode::BAD_REQUEST)
-                .body(Body::from(json!({"error": "'lifetime' is required and must be a string"}).to_string()+"\n"))
-                .unwrap()
+        return json_err(StatusCode::BAD_REQUEST, "'lifetime' is required and must be a string")
     }
     let lifetime = lifetime_option.unwrap();
 
@@ -244,10 +208,7 @@ async fn post_tokens(token_spec: serde_json::Value, db: &Client) -> Response<Bod
         && lifetime != "remember-me"
         && lifetime != "no-expiration"
     {
-        return Response::builder()
-                .status(StatusCode::BAD_REQUEST)
-                .body(Body::from(json!({"error": "'lifetime' must be 'until-idle', 'remember-me', or 'no-expiration'"}).to_string()+"\n"))
-                .unwrap()
+        return json_err(StatusCode::BAD_REQUEST, "'lifetime' must be 'until-idle', 'remember-me', or 'no-expiration'")
     }
 
     // get user record for the e-mail
@@ -259,10 +220,7 @@ async fn post_tokens(token_spec: serde_json::Value, db: &Client) -> Response<Bod
         .await
         .unwrap();
     if rows.len() != 1 {
-        return Response::builder()
-            .status(StatusCode::BAD_REQUEST)
-            .body(Body::from(json!({"error": "email not found or password invalid"}).to_string()+"\n"))
-            .unwrap()
+        return json_err(StatusCode::BAD_REQUEST, "email not found or password invalid")
     }
     let user = rows.get(0).unwrap();
 
@@ -270,10 +228,7 @@ async fn post_tokens(token_spec: serde_json::Value, db: &Client) -> Response<Bod
     let password_hash: String = user.get("password");
     let matches = argon2::verify_encoded(&password_hash, &password).unwrap();
     if !matches {
-        return Response::builder()
-            .status(StatusCode::BAD_REQUEST)
-            .body(Body::from(json!({"error": "email not found or password invalid"}).to_string()+"\n"))
-            .unwrap()
+        return json_err(StatusCode::BAD_REQUEST, "email not found or password invalid")
     }
 
     // create a token
@@ -298,16 +253,13 @@ async fn post_tokens(token_spec: serde_json::Value, db: &Client) -> Response<Bod
     let created: i32 = token.get("created");
     let last_active: i32 = token.get("last_active");
 
-    Response::builder()
-        .header("content-type", "application/json")
-        .body(Body::from(json!({
-            "id": token_id,
-            "token_secret": token_secret,
-            "lifetime": lifetime,
-            "created": created,
-            "last_active": last_active
-        }).to_string() + "\n"))
-        .unwrap()
+    json_ok(json!({
+        "id": token_id,
+        "token_secret": token_secret,
+        "lifetime": lifetime,
+        "created": created,
+        "last_active": last_active
+    }))
 }
 
 async fn handle_authenticated_request(route: Route, db: &Client, token: Token) -> Response<Body> {
@@ -319,10 +271,7 @@ async fn handle_authenticated_request(route: Route, db: &Client, token: Token) -
         Handler::GetTokensCurrentValid => get_tokens_current_valid(),
         Handler::GetTokensId => get_tokens_id(db, token.user_id, &route.path_params[0]).await,
         Handler::DeleteTokensId => delete_tokens_id(db, token, &route.path_params[0]).await,
-        _ => Response::builder()
-                .status(StatusCode::SERVICE_UNAVAILABLE)
-                .body(Body::from("service unavailable\n"))
-                .unwrap()
+        _ => json_err(StatusCode::SERVICE_UNAVAILABLE, "service unavailable")
     }
 }
 
@@ -347,10 +296,7 @@ async fn get_tokens(db: &Client, user_id: i32) -> Response<Body> {
         }
     ).collect();
 
-    Response::builder()
-        .header("content-type", "application/json")
-        .body(Body::from(json!({"user_id": user_id, "tokens": tokens }).to_string() + "\n"))
-        .unwrap()
+    json_ok(json!({"user_id": user_id, "tokens": tokens }))
 }
 
 async fn get_tokens_current(db: &Client, token: Token) -> Response<Body> {
@@ -362,10 +308,7 @@ async fn delete_tokens_current(db: &Client, token_id: String) -> Response<Body> 
         .await
         .unwrap();
 
-    Response::builder()
-        .header("content-type", "application/json")
-        .body(Body::from(json!({"success":"the token used to make this request was deleted"}).to_string() + "\n"))
-        .unwrap()
+    json_ok(json!({"success":"the token used to make this request was deleted"}))
 }
 
 async fn post_tokens_current_refresh(db: &Client, token_id: String) -> Response<Body> {
@@ -383,21 +326,16 @@ async fn post_tokens_current_refresh(db: &Client, token_id: String) -> Response<
     let created: i32 = token.get("created");
     let last_active: i32 = token.get("last_active");
 
-    Response::builder()
-        .header("content-type", "application/json")
-        .body(Body::from(json!({
-            "id": token_id,
-            "lifetime": lifetime,
-            "created": created,
-            "last_active": last_active
-        }).to_string() + "\n"))
-        .unwrap()
+    json_ok(json!({
+        "id": token_id,
+        "lifetime": lifetime,
+        "created": created,
+        "last_active": last_active
+    }))
 }
 
 fn get_tokens_current_valid() -> Response<Body> {
-    Response::builder()
-        .body(Body::empty())
-        .unwrap()
+    Response::builder().body(Body::empty()).unwrap()
 }
 
 async fn get_tokens_id(db: &Client, user_id: i32, token_id: &String) -> Response<Body> {
@@ -406,10 +344,7 @@ async fn get_tokens_id(db: &Client, user_id: i32, token_id: &String) -> Response
 
 async fn delete_tokens_id(db: &Client, token: Token, token_id: &String) -> Response<Body> {
     if *token_id == token.id {
-        return Response::builder()
-            .status(StatusCode::BAD_REQUEST)
-            .body(Body::from(json!({"error": "to delete current token, use the /tokens/current endpoint"}).to_string()+"\n"))
-            .unwrap()
+        return json_err(StatusCode::BAD_REQUEST, "to delete current token, use the /tokens/current endpoint")
     }
 
     let rows_deleted = db
@@ -421,16 +356,10 @@ async fn delete_tokens_id(db: &Client, token: Token, token_id: &String) -> Respo
         .unwrap();
 
     if rows_deleted < 1 {
-        return Response::builder()
-            .status(StatusCode::NOT_FOUND)
-            .body(Body::from(json!({"error": "invalid or expired token id"}).to_string()+"\n"))
-            .unwrap()
+        return json_err(StatusCode::NOT_FOUND, "invalid or expired token id")
     }
 
-    Response::builder()
-        .header("content-type", "application/json")
-        .body(Body::from(json!({"success": "the token was deleted"}).to_string() + "\n"))
-        .unwrap()
+    json_ok(json!({"success": "the token was deleted"}))
 }
 
 
@@ -513,10 +442,7 @@ async fn process_request(
         Ok(response) => response,
         Err(e) => {
             println!("TokioPostgresError: {}", e);
-            Response::builder()
-                .status(StatusCode::SERVICE_UNAVAILABLE)
-                .body(Body::from("service unavailable\n"))
-                .unwrap()
+            json_err(StatusCode::SERVICE_UNAVAILABLE, "service unavailable")
         }
     })
 }
@@ -529,10 +455,7 @@ async fn query_token_by_secret(token_secret: String, db: &Client) -> Result<Toke
     ).await.unwrap();
 
     if rows.len() != 1 {
-        return Err(Response::builder()
-            .status(StatusCode::UNAUTHORIZED)
-            .body(Body::from("invalid or expired token\n"))
-            .unwrap());
+        return Err(json_err(StatusCode::UNAUTHORIZED, "invalid or expired token"))
     }
 
     let row = rows.get(0).unwrap();
@@ -553,26 +476,20 @@ async fn query_token_details(token_id: String, user_id: i32, db: &Client) -> Res
         .await
         .unwrap();
     if rows.len() != 1 {
-        return Response::builder()
-            .status(StatusCode::UNAUTHORIZED)
-            .body(Body::from("invalid or expired token id\n"))
-            .unwrap()
+        return json_err(StatusCode::NOT_FOUND, "invalid or expired token id")
     }
     let other_token = rows.get(0).unwrap();
     let lifetime: String = other_token.get("lifetime");
     let created: i32 = other_token.get("created");
     let last_active: i32 = other_token.get("last_active");
 
-    Response::builder()
-        .header("content-type", "application/json")
-        .body(Body::from(json!({
-            "id": token_id,
-            "user_id": user_id,
-            "lifetime": lifetime,
-            "created": created,
-            "last_active": last_active
-        }).to_string() + "\n"))
-        .unwrap()
+    json_ok(json!({
+        "id": token_id,
+        "user_id": user_id,
+        "lifetime": lifetime,
+        "created": created,
+        "last_active": last_active
+    }))
 }
 
 fn get_token_secret(request: &Request<Body>) -> Result<String, Response<Body>> {
@@ -598,10 +515,7 @@ fn get_token_secret(request: &Request<Body>) -> Result<String, Response<Body>> {
             match token_secret_option {
                 Some(first_token_secret) => {
                     if first_token_secret != token_secret {
-                        return Err(Response::builder()
-                            .status(StatusCode::BAD_REQUEST)
-                            .body(Body::from("multiple token cookies\n"))
-                            .unwrap());
+                        return Err(json_err(StatusCode::BAD_REQUEST, "multiple token cookies"))
                     }
                 }
                 None => token_secret_option = Some(token_secret),
@@ -611,15 +525,27 @@ fn get_token_secret(request: &Request<Body>) -> Result<String, Response<Body>> {
 
     match token_secret_option {
         Some(token_secret) => Ok(token_secret.to_string()),
-        None => Err(Response::builder()
-            .status(StatusCode::UNAUTHORIZED)
-            .body(Body::from(if found_token_cookie {
-                "token cookie invalid format\n"
+        None => Err(json_err(StatusCode::UNAUTHORIZED, if found_token_cookie {
+                "token cookie invalid format"
             } else {
-                "missing token cookie\n"
+                "missing token cookie"
             }))
-            .unwrap()),
     }
+}
+
+fn json_ok(json: serde_json::value::Value) -> Response<Body> {
+    Response::builder()
+        .header("content-type", "application/json")
+        .body(Body::from(json.to_string()+"\n"))
+        .unwrap()
+}
+
+fn json_err(status_code: StatusCode, error: &str) -> Response<Body> {
+    Response::builder()
+        .status(status_code)
+        .header("content-type", "application/json")
+        .body(Body::from(json!({"error": error}).to_string()+"\n"))
+        .unwrap()
 }
 
 async fn shutdown_signal() {
