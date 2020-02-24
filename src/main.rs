@@ -94,18 +94,15 @@ fn get_route(request: &Request<Body>) -> Result<Route, Response<Body>> {
     };
 
     if !path_found {
-        match TOKENS_ID_PATH_REGEX.captures(path).unwrap().get(1) {
-            Some(id_match) => {
-                path_found = true;
-                let path_params = [id_match.as_str().to_string()].to_vec();
+        if let Some(id_match) = TOKENS_ID_PATH_REGEX.captures(path).unwrap().get(1) {
+            path_found = true;
+            let path_params = [id_match.as_str().to_string()].to_vec();
 
-                match *request.method() {
-                    Method::GET => return Ok(route_path_params(Handler::GetTokensId, path_params)),
-                    Method::DELETE => return Ok(route_path_params(Handler::DeleteTokensId, path_params)),
-                    _ => ()
-                };
-            }
-            None => ()
+            match *request.method() {
+                Method::GET => return Ok(route_path_params(Handler::GetTokensId, path_params)),
+                Method::DELETE => return Ok(route_path_params(Handler::DeleteTokensId, path_params)),
+                _ => ()
+            };
         }
     }
 
@@ -118,18 +115,16 @@ fn get_route(request: &Request<Body>) -> Result<Route, Response<Body>> {
 
 async fn handle_anonymous_request(handler: Handler, request: Request<Body>, db: &Client) -> Response<Body> {
     // TODO check content-type
-    let whole_body_result = hyper::body::aggregate(request).await;
-    if whole_body_result.is_err() {
-        println!("could not get whole body");
-        return json_err(StatusCode::SERVICE_UNAVAILABLE, "service unavailable\n")
-    }
-    let data_result: Result<serde_json::Value, _> = serde_json::from_reader(whole_body_result.unwrap().reader());
-    if data_result.is_err() {
-        println!("could not parse body {}", data_result.unwrap_err());
-        return json_err(StatusCode::BAD_REQUEST, "could not parse body\n")
-    }
-
-    let data = data_result.unwrap();
+    let data = match hyper::body::aggregate(request).await {
+        Err(e) => {
+            println!("could not get whole body {:?}", e);
+            return json_err(StatusCode::SERVICE_UNAVAILABLE, "service unavailable")
+        }
+        Ok(whole_body) => match serde_json::from_reader(whole_body.reader()) {
+            Err(_) => return json_err(StatusCode::BAD_REQUEST, "could not parse body"),
+            Ok(data) => data
+        }
+    };
 
     match handler {
         Handler::PostUsers => post_users(data, db).await,
@@ -338,11 +333,11 @@ fn get_tokens_current_valid() -> Response<Body> {
     Response::builder().body(Body::empty()).unwrap()
 }
 
-async fn get_tokens_id(db: &Client, user_id: i32, token_id: &String) -> Response<Body> {
+async fn get_tokens_id(db: &Client, user_id: i32, token_id: &str) -> Response<Body> {
     query_token_details(token_id.to_string(), user_id, db).await
 }
 
-async fn delete_tokens_id(db: &Client, token: Token, token_id: &String) -> Response<Body> {
+async fn delete_tokens_id(db: &Client, token: Token, token_id: &str) -> Response<Body> {
     if *token_id == token.id {
         return json_err(StatusCode::BAD_REQUEST, "to delete current token, use the /tokens/current endpoint")
     }
@@ -350,7 +345,7 @@ async fn delete_tokens_id(db: &Client, token: Token, token_id: &String) -> Respo
     let rows_deleted = db
         .execute(
             "DELETE FROM token_active WHERE id = $1 AND identity_id=$2",
-            &[token_id, &token.user_id],
+            &[&token_id, &token.user_id],
         )
         .await
         .unwrap();
