@@ -34,11 +34,24 @@ enum Handler {
 struct Route {
     auth_required: bool,
     handler: Handler,
+    path_params: Vec<String>,
+}
+
+fn route(handler: Handler) -> Route {
+    Route { auth_required: true, handler, path_params: [].to_vec() }
+}
+
+fn route_path_params(handler: Handler, path_params: Vec<String>) -> Route {
+    Route { auth_required: true, handler, path_params }
+}
+
+fn route_anon(handler: Handler) -> Route {
+    Route { auth_required: false, handler, path_params: [].to_vec() }
 }
 
 lazy_static! {
     static ref TOKEN_SECRET_REGEX: regex::Regex = regex::Regex::new("^[a-fA-F0-9]{64}$").unwrap();
-    static ref TOKENS_ID_PATH_REGEX: regex::Regex = regex::Regex::new("^/tokens/[a-fA-F0-9]{32}$").unwrap();
+    static ref TOKENS_ID_PATH_REGEX: regex::Regex = regex::Regex::new("^/tokens/([a-fA-F0-9]{32})$").unwrap();
 }
 
 fn get_route(request: &Request<Body>) -> Result<Route, Response<Body>> {
@@ -56,38 +69,44 @@ fn get_route(request: &Request<Body>) -> Result<Route, Response<Body>> {
 
     match path {
         "/users" => match *request.method() {
-            Method::POST => return Ok(Route { auth_required: false, handler: Handler::PostUsers }),
+            Method::POST => return Ok(route_anon(Handler::PostUsers)),
             _ => ()
         },
         "/tokens" => match *request.method() {
-            Method::GET => return Ok(Route { auth_required: true, handler: Handler::GetTokens }),
-            Method::POST => return Ok(Route { auth_required: false, handler: Handler::PostTokens }),
+            Method::GET => return Ok(route(Handler::GetTokens)),
+            Method::POST => return Ok(route_anon(Handler::PostTokens)),
             _ => ()
         },
         "/tokens/current" => match *request.method() {
-            Method::GET => return Ok(Route { auth_required: true, handler: Handler::GetTokensCurrent }),
-            Method::DELETE => return Ok(Route { auth_required: true, handler: Handler::DeleteTokensCurrent }),
+            Method::GET => return Ok(route(Handler::GetTokensCurrent)),
+            Method::DELETE => return Ok(route(Handler::DeleteTokensCurrent)),
             _ => ()
         },
         "/tokens/current/refresh" => match *request.method() {
-            Method::POST => return Ok(Route { auth_required: true, handler: Handler::PostTokensCurrentRefresh }),
+            Method::POST => return Ok(route(Handler::PostTokensCurrentRefresh)),
             _ => ()
         },
         "/tokens/current/valid" => match *request.method() {
-            Method::GET => return Ok(Route { auth_required: true, handler: Handler::GetTokensCurrentValid }),
+            Method::GET => return Ok(route(Handler::GetTokensCurrentValid)),
             _ => ()
         },
         _ => path_found = false
     };
 
-    if !path_found && TOKENS_ID_PATH_REGEX.is_match(path) {
-        path_found = true;
+    if !path_found {
+        match TOKENS_ID_PATH_REGEX.captures(path).unwrap().get(1) {
+            Some(id_match) => {
+                path_found = true;
+                let path_params = [id_match.as_str().to_string()].to_vec();
 
-        match *request.method() {
-            Method::GET => return Ok(Route { auth_required: true, handler: Handler::GetTokensId }),
-            Method::DELETE => return Ok(Route { auth_required: true, handler: Handler::DeleteTokensId }),
-            _ => ()
-        };
+                match *request.method() {
+                    Method::GET => return Ok(route_path_params(Handler::GetTokensId, path_params)),
+                    Method::DELETE => return Ok(route_path_params(Handler::DeleteTokensId, path_params)),
+                    _ => ()
+                };
+            }
+            None => ()
+        }
     }
 
     if path_found {
