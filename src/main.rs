@@ -294,7 +294,7 @@ async fn post_tokens(token_spec: serde_json::Value, db: &Client) -> Response<Bod
 async fn handle_authenticated_request(handler: Handler, db: &Client, token: Token) -> Response<Body> {
     match handler {
         Handler::GetTokens => get_tokens(db, token.user_id).await,
-        Handler::GetTokensCurrent => get_tokens_current(db, token.user_id).await,
+        Handler::GetTokensCurrent => get_tokens_current(db, token).await,
         Handler::DeleteTokensCurrent => delete_tokens_current(db, token.user_id).await,
         Handler::PostTokensCurrentRefresh => post_tokens_current_refresh(db, token.user_id).await,
         Handler::GetTokensCurrentValid => get_tokens_current_valid(),
@@ -334,10 +334,8 @@ async fn get_tokens(db: &Client, user_id: i32) -> Response<Body> {
         .unwrap()
 }
 
-async fn get_tokens_current(db: &Client, user_id: i32) -> Response<Body> {
-    Response::builder()
-        .body(Body::from(format!("get_tokens_current {}\n", user_id)))
-        .unwrap()
+async fn get_tokens_current(db: &Client, token: Token) -> Response<Body> {
+    query_token_details(token.id, token.user_id, db).await
 }
 
 async fn delete_tokens_current(db: &Client, user_id: i32) -> Response<Body> {
@@ -433,7 +431,7 @@ async fn process_request(
     let result = pool.run(move |db| {
         async move {
             let response = if let Some(token_secret) = token_secret_option {
-                match get_token(token_secret, &db).await {
+                match query_token_by_secret(token_secret, &db).await {
                     Ok(token) => handle_authenticated_request(route.handler, &db, token).await,
                     Err(e) => e
                 }
@@ -458,8 +456,8 @@ async fn process_request(
     })
 }
 
-async fn get_token(token_secret: String, db: &Client) -> Result<Token, Response<Body>> {
-    println!("get_token");
+async fn query_token_by_secret(token_secret: String, db: &Client) -> Result<Token, Response<Body>> {
+    println!("query_token_by_secret");
     let rows = db.query(
         "SELECT id, identity_id FROM token_active WHERE secret = $1",
         &[&token_secret],
@@ -477,6 +475,39 @@ async fn get_token(token_secret: String, db: &Client) -> Result<Token, Response<
     let user_id: i32 = row.get("identity_id");
 
     Ok(Token{ id, user_id })
+}
+
+async fn query_token_details(token_id: String, user_id: i32, db: &Client) -> Response<Body> {
+    let rows = db
+        .query(
+            "SELECT lifetime, cast(extract(epoch from created) as integer) created, \
+                cast(extract(epoch from last_active) as integer) last_active \
+            FROM token_active WHERE id = $1 AND identity_id = $2",
+            &[&token_id, &user_id],
+        )
+        .await
+        .unwrap();
+    if rows.len() != 1 {
+        return Response::builder()
+            .status(StatusCode::UNAUTHORIZED)
+            .body(Body::from("invalid or expired token id\n"))
+            .unwrap()
+    }
+    let other_token = rows.get(0).unwrap();
+    let lifetime: String = other_token.get("lifetime");
+    let created: i32 = other_token.get("created");
+    let last_active: i32 = other_token.get("last_active");
+
+    Response::builder()
+        .header("content-type", "application/json")
+        .body(Body::from(json!({
+            "id": token_id,
+            "user_id": user_id,
+            "lifetime": lifetime,
+            "created": created,
+            "last_active": last_active
+        }).to_string() + "\n"))
+        .unwrap()
 }
 
 fn get_token_secret(request: &Request<Body>) -> Result<String, Response<Body>> {
