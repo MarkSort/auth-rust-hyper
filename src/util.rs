@@ -23,7 +23,7 @@ pub fn get_email_pass(spec: &serde_json::Value) -> Result<(String, &[u8]), Respo
 
 pub fn json_ok(json: serde_json::Value) -> Response<Body> {
     Response::builder()
-        .header("content-type", "application/json")
+        .header("content-type", "application/json;charset=utf-8")
         .body(Body::from(json.to_string()+"\n"))
         .unwrap()
 }
@@ -31,7 +31,7 @@ pub fn json_ok(json: serde_json::Value) -> Response<Body> {
 pub fn json_err(status_code: StatusCode, error: &str) -> Response<Body> {
     Response::builder()
         .status(status_code)
-        .header("content-type", "application/json")
+        .header("content-type", "application/json;charset=utf-8")
         .body(Body::from(json!({"error": error}).to_string()+"\n"))
         .unwrap()
 }
