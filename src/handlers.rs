@@ -102,7 +102,7 @@ pub async fn post_tokens(token_spec: serde_json::Value, db: &Client) -> Response
 
     util::json_ok(json!({
         "id": token_id,
-        "token_secret": token_secret,
+        "secret": token_secret,
         "lifetime": lifetime,
         "created": created,
         "last_active": last_active

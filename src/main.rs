@@ -112,7 +112,16 @@ fn get_route(request: &Request<Body>) -> Result<Route, Response<Body>> {
 }
 
 async fn handle_anonymous_request(handler: Handler, request: Request<Body>, db: &Client) -> Response<Body> {
-    // TODO check content-type
+    let content_types: Vec<&hyper::header::HeaderValue> = request.headers().get_all("content-type").iter().collect();
+    if content_types.len() > 1 {
+        return util::json_err(StatusCode::BAD_REQUEST, "multiple content-type headers");
+    } else if content_types.len() == 1 {
+        let content_type_parts: Vec<&str> = content_types[0].to_str().unwrap().split(';').collect();
+        if content_type_parts[0].trim().to_ascii_lowercase() != "application/json" {
+            return util::json_err(StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported media type");
+        }
+    }
+
     let data = match hyper::body::aggregate(request).await {
         Err(e) => {
             println!("could not get whole body {:?}", e);
